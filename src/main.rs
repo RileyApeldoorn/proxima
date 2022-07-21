@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use hyper::{service::{make_service_fn, service_fn}, Error, Server, Response, StatusCode, Body, Request, Uri, client::HttpConnector};
+use hyper::{service::{make_service_fn, service_fn}, Server, Response, StatusCode, Body, Request, Uri, client::HttpConnector, http};
 
 pub mod parse;
 
@@ -60,8 +60,7 @@ async fn main() {
                     // circuit).
                     let res = Response::builder()
                         .status(StatusCode::BAD_GATEWAY)
-                        .body(Body::empty())
-                        .expect("Failed to construct response");
+                        .body(Body::empty())?;
 
                     Ok (res)
 
@@ -118,6 +117,33 @@ pub fn parse (data: String) -> Config {
 
     Config (rules)
 }
+
+/// Runtime errors.
+#[derive(Debug)]
+pub enum Error {
+	Hyper (hyper::Error),
+	Http (http::Error),
+}
+
+impl std::error::Error for Error {}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+			Error::Hyper (e) => e.fmt(f),
+			Error::Http (e) => e.fmt(f),
+        }
+    }
+}
+
+impl From<hyper::Error> for Error {
+    fn from (v: hyper::Error) -> Self { Self::Hyper(v) }
+}
+
+impl From<http::Error> for Error {
+    fn from (v: http::Error) -> Self { Self::Http(v) }
+}
+
 /// A rule consists of a [`Pattern`] and an [`Effect`]. If the pattern matches,
 /// the effect is performed.
 #[derive(Clone, Debug)]
@@ -204,39 +230,37 @@ pub enum Effect {
 
 impl Effect {
     /// Perform the effect.
-    pub async fn perform (&self, client: Client, mut req: Request<Body>) -> hyper::Result<Response<Body>> {
-        match self {
+    pub async fn perform (&self, client: Client, mut req: Request<Body>) -> Result<Response<Body>, Error> {
+        let res = match self {
             Effect::Proxy { port, .. } => {
                 let host = "0.0.0.0"; // Support for custom hosts added later
                 let path = req
                     .uri()
                     .path_and_query()
-                    .and_then(|x| {
-                        // Reject all requests where the path doesn't start with a `/`,
-                        // and strip the first `/` off all paths so we can ensure that
-                        // the path is actually separated from the host and port.
-                        x.as_str().strip_prefix('/')
-                    })
+                    .map(|x| x.as_str())
                     .unwrap_or("");
 
-                let target = format!("http://{host}:{port}/{path}");
+                let uri = Uri::builder()
+                    .authority(format!("{host}:{port}"))
+                    .scheme("http")
+                    .path_and_query(path)
+                    .build()?;
 
-                let uri = target.parse().unwrap();
+                println!("Proxying to {uri}");
+
                 *req.uri_mut() = uri;
-
-                println!("Proxying to {target}");
-                
-                client.request(req).await
+                client.request(req).await?
             },
-            Effect::Redirect (uri) => Ok ({
+            Effect::Redirect (uri) => {
                 println!("Redirecting to {uri}");
                 Response::builder()
                     .status(StatusCode::PERMANENT_REDIRECT)
                     .header("Location", uri)
-                    .body(Body::empty())
-                    .unwrap()
-            }),
-        }
+                    .body(Body::empty())?
+            },
+        };
+
+        Ok (res)
     }
 }
 
