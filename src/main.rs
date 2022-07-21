@@ -208,8 +208,18 @@ impl Effect {
         match self {
             Effect::Proxy { port, .. } => {
                 let host = "0.0.0.0"; // Support for custom hosts added later
-                let path = req.uri().path_and_query().map(|x| x.as_str()).unwrap_or("");
-                let target = format!("http://{host}:{port}{path}");
+                let path = req
+                    .uri()
+                    .path_and_query()
+                    .and_then(|x| {
+                        // Reject all requests where the path doesn't start with a `/`,
+                        // and strip the first `/` off all paths so we can ensure that
+                        // the path is actually separated from the host and port.
+                        x.as_str().strip_prefix('/')
+                    })
+                    .unwrap_or("");
+
+                let target = format!("http://{host}:{port}/{path}");
 
                 let uri = target.parse().unwrap();
                 *req.uri_mut() = uri;
